@@ -1173,11 +1173,13 @@ HRESULT __stdcall D3D9Device_EndScene(IDirect3DDevice9* device) noexcept
                 control_center->get_applet_dimensions(&x, &y, &applet_width, &applet_height);
                 control_center->set_target_dimensions(static_cast<std::int32_t>(applet_width), static_cast<std::int32_t>(applet_height));
 
-                if (width != applet_width || height != applet_height)
+                /*if (width != applet_width || height != applet_height)
                 {
                     // Possibly menu open, render normally
                     return directx_device9_endscene_hook->call<HRESULT, decltype(D3D9Device_EndScene)>(device);
-                }
+                }*/
+
+                control_center->set_target_dimensions(static_cast<std::int32_t>(width), static_cast<std::int32_t>(height));
 
                 bool minimized = false;
                 ImageFormat image_format = control_center->get_image_format();

@@ -436,10 +436,10 @@ EIOS* SimbaPluginTarget_RequestWithDebugImage(const char* initargs, void** image
         std::int32_t width = 0;
         std::int32_t height = 0;
         eios->control_center->get_target_dimensions(&width, &height);
-        eios->control_center->set_image_format(ImageFormat::BGRA);
+        eios->control_center->set_image_format(ImageFormat::BGR_BGRA);
         eios->control_center->set_debug_graphics(true);
         *image = PLUGIN_SIMBA_METHODS.ExternalImage_Create(true);
-        PLUGIN_SIMBA_METHODS.ExternalImage_SetMemory(*image, eios->control_center->get_debug_image(), width, height);         
+        PLUGIN_SIMBA_METHODS.ExternalImage_SetMemory(*image, eios->control_center->get_debug_image(), width, height);
     }
 
     return eios;
@@ -457,11 +457,11 @@ void SimbaPluginTarget_GetDimensions(EIOS* eios, std::int32_t* width, std::int32
 
 bool SimbaPluginTarget_GetImageData(EIOS* eios, std::int32_t x, std::int32_t y, std::int32_t width, std::int32_t height, void** bgra, std::int32_t* data_width) noexcept
 {
-    if (eios) 
+    if (eios)
     {
         *data_width = eios->control_center->get_target_width();
         *bgra = &eios->control_center->get_image()[(y * (*data_width) + x) * 4];
-        
+
         return true;
     } else {
         return false;

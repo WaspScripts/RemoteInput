@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - 'feature/**'
+      - dx-rollback
   pull_request:
     branches:
       - main
@@ -270,5 +270,5 @@ jobs:
         run: |
           gh release create "$TAG_NAME" \
             --title "Release $TAG_NAME" \
-            --notes "Automated build from commit $COMMIT_HASH" \
+            --notes "Automated build from commit $COMMIT_HASH on branch $BRANCH_NAME" \
             artifact/*

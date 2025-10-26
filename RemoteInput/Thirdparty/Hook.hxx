@@ -31,6 +31,9 @@ public:
 
     template<typename R, typename FuncPtr, typename... Args>
     R call(Args... args);
+
+    static void setup();
+    static void teardown();
 };
 
 template<typename R, typename FuncPtr, typename... Args>

@@ -24,8 +24,6 @@
 Hook::Hook(void* original, void* detour) : original(original), detour(detour), trampoline(nullptr), data()
 {
     std::memset(&data[0], 0, sizeof(data));
-
-    MH_Initialize();
     MH_CreateHook(original, detour, &trampoline);
 }
 
@@ -41,7 +39,6 @@ Hook::Hook(Hook&& other) noexcept : original(other.original), detour(other.detou
 Hook::~Hook()
 {
     remove();
-    MH_Uninitialize();
 }
 
 void Hook::apply()
@@ -146,3 +143,17 @@ void Hook::remove()
     DetourUninstallHook(reinterpret_cast<HOOK_TRACE_INFO*>(trampoline));
 }
 #endif
+
+void Hook::setup()
+{
+#if defined(_WIN32) || defined(_WIN64)
+    MH_Initialize();
+#endif
+}
+
+void Hook::teardown()
+{
+#if defined(_WIN32) || defined(_WIN64)
+    MH_Uninitialize();
+#endif
+}

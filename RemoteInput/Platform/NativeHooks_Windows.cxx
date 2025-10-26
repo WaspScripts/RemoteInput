@@ -41,10 +41,14 @@ std::unique_ptr<Hook> opengl_swap_hook{nullptr};
 
 std::unique_ptr<Hook> directx_xrgb_hook{nullptr};
 std::unique_ptr<Hook> directx_argb_hook{nullptr};
+std::unique_ptr<Hook> directx_d3d9_createdevice_hook{nullptr};
 std::unique_ptr<Hook> directx_device9_endscene_hook{nullptr};
-std::unique_ptr<Hook> directx_device9_present_hook{nullptr};
-std::unique_ptr<Hook> directx_device9_swapchain_present_hook{nullptr};
+std::unique_ptr<Hook> directx_device9_reset_hook{nullptr};
 std::unique_ptr<Hook> directx_device11_swapchain_present_hook{nullptr};
+
+bool is_dx_hooked = false;
+IDirect3DDevice9* current_dx_device = nullptr;
+void HookD3D9Device(IDirect3DDevice9* pDevice, bool force = false) noexcept;
 
 bool can_render(jint srctype, jint width, jint height)
 {
@@ -606,67 +610,15 @@ HRESULT __cdecl JavaDirectXCopyImageToIntArgbSurface(IDirect3DSurface9 *pSurface
         return directx_xrgb_hook->call<HRESULT, decltype(JavaDirectXCopyImageToIntArgbSurface)>(pSurface, pDstInfo, srcx, srcy, srcWidth, srcHeight, dstx, dsty);
     }
 
-    auto ptr_coord = [](std::uint8_t* image_ptr, std::uint32_t x, std::uint32_t y, std::uint32_t pixel_stride, std::uint32_t scan_stride) -> std::uint8_t* {
-        return image_ptr ? image_ptr + ((y * scan_stride) + (x * pixel_stride)) : nullptr;
-    };
-
-    //Setup Data Bounds
-    D3DLOCKED_RECT lockedRect = {0};
-    RECT rect = {dstx, dsty, dstx + srcWidth, dsty + srcHeight};
-    RECT *pR = &rect;
-
-    //Prepare for rendering to the screen..
-    HRESULT res = pSurface->LockRect(&lockedRect, pR, D3DLOCK_NOSYSLOCK);
-    if (FAILED(res))
+    IDirect3DDevice9* pDevice = nullptr;
+    if (SUCCEEDED(pSurface->GetDevice(&pDevice)) && pDevice)
     {
-        return res;
+        HookD3D9Device(pDevice);
+        pDevice->Release();
+        is_dx_hooked = true;
     }
 
-    D3DSURFACE_DESC desc;
-    pSurface->GetDesc(&desc);
-
-    jint width = srcWidth;
-    jint height = srcHeight;
-
-    //Prepare for BackBuffer Rendering
-    control_center->set_target_dimensions(width, height);
-    ImageFormat format = control_center->get_image_format();
-    std::uint8_t* destImage = ptr_coord(control_center->get_image(), srcx, srcy, pDstInfo->pixelStride, pDstInfo->scanStride);
-    std::uint8_t* debugImage = ptr_coord(control_center->get_debug_graphics() ? control_center->get_debug_image() : nullptr, srcx, srcy, pDstInfo->pixelStride, pDstInfo->scanStride);
-
-    //Begin Rendering
-    std::uint8_t* pSrcBase = ptr_coord(static_cast<std::uint8_t*>(pDstInfo->rasBase), srcx, srcy, pDstInfo->pixelStride, pDstInfo->scanStride);
-    std::uint8_t* pDstBase = ptr_coord(static_cast<std::uint8_t*>(lockedRect.pBits), dstx, dsty, pDstInfo->pixelStride, pDstInfo->scanStride);
-
-
-    std::uint8_t* texture = pSrcBase;
-    std::uint8_t* screen = pDstBase;
-
-    // Render to Screen
-    std::memcpy(screen, texture, srcWidth * srcHeight * pDstInfo->pixelStride);
-
-    // Render to Destination
-    copy_image(destImage, texture, srcWidth, srcHeight, pDstInfo->pixelStride, format);
-
-    // Render Debug Image
-    if (debugImage)
-    {
-        draw_image(screen, debugImage, srcWidth, srcHeight, pDstInfo->pixelStride, format);
-    }
-
-    //Render Cursor
-    std::int32_t x = -1;
-    std::int32_t y = -1;
-    control_center->get_applet_mouse_position(&x, &y);
-    screen = static_cast<uint8_t*>(pDstBase);
-
-    if (x > -1 && y > -1 && x <= srcx + srcWidth && y <= srcy + srcHeight)
-    {
-        static const std::int32_t radius = 2;
-        draw_circle(x - srcx, y - srcy, radius, screen, srcWidth, srcHeight, 4, true, 0xFF0000FF);
-    }
-
-    return pSurface->UnlockRect();
+    return directx_xrgb_hook->call<HRESULT, decltype(JavaDirectXCopyImageToIntArgbSurface)>(pSurface, pDstInfo, srcx, srcy, srcWidth, srcHeight, dstx, dsty);
 }
 
 //Java_sun_java2d_d3d_D3DRenderQueue_flushBuffer -> D3DRQ_FlushBuffer -> sun_java2d_pipe_BufferedOpCodes_BLIT -> D3DBlitLoops_Blit -> D3DBlitSwToTexture -> D3DBL_CopyImageToIntXrgbSurface
@@ -680,24 +632,6 @@ HRESULT __cdecl JavaDirectXCopyImageToIntXrgbSurface(SurfaceDataRasInfo *pSrcInf
         return directx_xrgb_hook->call<HRESULT, decltype(JavaDirectXCopyImageToIntXrgbSurface)>(pSrcInfo, srctype, pDstSurfaceRes, srcx, srcy, srcWidth, srcHeight, dstx, dsty);
     }
 
-    //Hook
-    static const int ST_INT_ARGB        = 0;
-    static const int ST_INT_ARGB_PRE    = 1;
-    static const int ST_INT_ARGB_BM     = 2;
-    static const int ST_INT_RGB         = 3;
-    static const int ST_INT_BGR         = 4;
-    static const int ST_USHORT_565_RGB  = 5;
-    static const int ST_USHORT_555_RGB  = 6;
-    static const int ST_BYTE_INDEXED    = 7;
-    static const int ST_BYTE_INDEXED_BM = 8;
-    static const int ST_3BYTE_BGR       = 9;
-
-    if (srctype != ST_INT_RGB) //!can_render(srctype, width, height);
-    {
-        //Canvas will always be drawn as ST_INT_RGB.. Other UI can be drawn in other formats which screws up our debug drawing.. :S
-        return directx_xrgb_hook->call<HRESULT, decltype(JavaDirectXCopyImageToIntXrgbSurface)>(pSrcInfo, srctype, pDstSurfaceRes, srcx, srcy, srcWidth, srcHeight, dstx, dsty);
-    }
-
     //Retrieve data pointers and v-table from the D3DResource structure..
     auto get_data_pointer = [](D3DResource* base) -> void* {
         return reinterpret_cast<void**>((reinterpret_cast<char*>(base) + sizeof(D3DResource)) - sizeof(D3DSURFACE_DESC) - (sizeof(void*) * 5));
@@ -707,109 +641,18 @@ HRESULT __cdecl JavaDirectXCopyImageToIntXrgbSurface(SurfaceDataRasInfo *pSrcInf
         return *reinterpret_cast<void**>(reinterpret_cast<char*>(data_ptr) + (sizeof(void*) * index));
     };
 
-    auto offset_image = [](std::uint8_t* image_ptr, std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint16_t stride) {
-        return image_ptr ? image_ptr + ((y * width * stride) + (x * stride)) : nullptr;
-    };
-
-    auto ptr_coord = [](std::uint8_t* image_ptr, std::uint32_t x, std::uint32_t y, std::uint32_t pixel_stride, std::uint32_t scan_stride) -> std::uint8_t* {
-        return image_ptr ? image_ptr + ((y * scan_stride) + (x * pixel_stride)) : nullptr;
-    };
-
     void* base_ptr = get_data_pointer(pDstSurfaceRes);
-    //IDirect3DResource9* pResource = reinterpret_cast<IDirect3DResource9*>(get_offset(base_ptr, 0));
-    //IDirect3DSwapChain9* pSwapChain = reinterpret_cast<IDirect3DSwapChain9*>(get_offset(base_ptr, 1));
     IDirect3DSurface9* pSurface = reinterpret_cast<IDirect3DSurface9*>(get_offset(base_ptr, 2));
-    //IDirect3DTexture9* pTexture = reinterpret_cast<IDirect3DTexture9*>(get_offset(base_ptr, 3));
-    D3DSURFACE_DESC* pSurfaceDesc = reinterpret_cast<D3DSURFACE_DESC*>(reinterpret_cast<char*>(base_ptr) + (sizeof(void*) * 5));
 
-    //Setup Data Bounds
-    D3DLOCKED_RECT lockedRect = {0};
-    RECT rect = {dstx, dsty, dstx + srcWidth, dsty + srcHeight};
-    RECT *pR = &rect;
-    DWORD dwLockFlags = D3DLOCK_NOSYSLOCK;
-
-    if (pSurfaceDesc->Usage == D3DUSAGE_DYNAMIC)
+    IDirect3DDevice9* pDevice = nullptr;
+    if (SUCCEEDED(pSurface->GetDevice(&pDevice)) && pDevice)
     {
-        dwLockFlags |= D3DLOCK_DISCARD;
-        pR = nullptr;
-    }
-    else
-    {
-        dstx = 0;
-        dsty = 0;
+        HookD3D9Device(pDevice);
+        pDevice->Release();
+        is_dx_hooked = true;
     }
 
-    //Prepare for rendering to the screen..
-    HRESULT res = pSurface->LockRect(&lockedRect, pR, dwLockFlags);
-    if (FAILED(res))
-    {
-        return res;
-    }
-
-    D3DSURFACE_DESC desc;
-    pSurface->GetDesc(&desc);
-
-    SurfaceDataRasInfo dstInfo;
-    ZeroMemory(&dstInfo, sizeof(SurfaceDataRasInfo));
-    dstInfo.bounds.x2 = srcWidth;
-    dstInfo.bounds.y2 = srcHeight;
-    dstInfo.scanStride = lockedRect.Pitch;
-    dstInfo.pixelStride = 4;
-
-    jint width = pSrcInfo->bounds.x2 - pSrcInfo->bounds.x1;
-    jint height = pSrcInfo->bounds.y2 - pSrcInfo->bounds.y1;
-
-    //Prepare for BackBuffer Rendering
-    control_center->set_target_dimensions(width, height);
-    ImageFormat format = control_center->get_image_format();
-    std::uint8_t* destImage = ptr_coord(control_center->get_image(), srcx, srcy, pSrcInfo->pixelStride, pSrcInfo->scanStride);
-    std::uint8_t* debugImage = ptr_coord(control_center->get_debug_graphics() ? control_center->get_debug_image() : nullptr, srcx, srcy, pSrcInfo->pixelStride, pSrcInfo->scanStride);
-
-    //Begin Rendering
-    std::uint8_t* pSrcBase = ptr_coord(static_cast<std::uint8_t*>(pSrcInfo->rasBase), srcx, srcy, pSrcInfo->pixelStride, pSrcInfo->scanStride);
-    std::uint8_t* pDstBase = ptr_coord(static_cast<std::uint8_t*>(lockedRect.pBits), dstx, dsty, dstInfo.pixelStride, dstInfo.scanStride);
-
-
-    std::uint8_t* texture = pSrcBase;
-    std::uint8_t* screen = pDstBase;
-
-    for (jint i = 0; i < srcHeight; ++i)
-    {
-        // Render to Screen
-        std::memcpy(screen, texture, srcWidth * pSrcInfo->pixelStride);
-
-        // Render to Destination
-        copy_image(destImage, texture, srcWidth, 1, pSrcInfo->pixelStride, format);
-
-        // Draw Debug Image
-        if (debugImage)
-        {
-            draw_image(screen, debugImage, srcWidth, 1, pSrcInfo->pixelStride, format);
-        }
-
-        screen += dstInfo.scanStride;
-        texture += pSrcInfo->scanStride;
-        destImage += pSrcInfo->scanStride;
-
-        if (debugImage)
-        {
-            debugImage += pSrcInfo->scanStride;
-        }
-    }
-
-    //Render Cursor
-    std::int32_t x = -1;
-    std::int32_t y = -1;
-    control_center->get_applet_mouse_position(&x, &y);
-    screen = static_cast<uint8_t*>(pDstBase);
-
-    if (x > -1 && y > -1 && x <= srcx + srcWidth && y <= srcy + srcHeight)
-    {
-        static const std::int32_t radius = 2;
-        draw_circle(x - srcx, y - srcy, radius, screen, srcWidth, srcHeight, 4, true, 0xFF0000FF);
-    }
-
-    return pSurface->UnlockRect();
+    return directx_xrgb_hook->call<HRESULT, decltype(JavaDirectXCopyImageToIntXrgbSurface)>(pSrcInfo, srctype, pDstSurfaceRes, srcx, srcy, srcWidth, srcHeight, dstx, dsty);
 }
 #endif
 
@@ -1151,6 +994,24 @@ HRESULT __stdcall D3D11Device_Present(IDXGISwapChain* pThis, UINT SyncInterval, 
     return E_FAIL;
 }
 
+HRESULT __stdcall D3D9_CreateDevice(IDirect3D9* pD3D, UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, D3DPRESENT_PARAMETERS* pPresentationParameters, IDirect3DDevice9** ppReturnedDeviceInterface) noexcept
+{
+    if (directx_d3d9_createdevice_hook)
+    {
+        HRESULT result = directx_d3d9_createdevice_hook->call<HRESULT, decltype(D3D9_CreateDevice)>(pD3D, Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, ppReturnedDeviceInterface);
+        if (ppReturnedDeviceInterface && *ppReturnedDeviceInterface)
+        {
+            if (!is_dx_hooked)
+            {
+                HookD3D9Device(*ppReturnedDeviceInterface);
+            }
+        }
+        return result;
+    }
+
+    return E_FAIL;
+}
+
 HRESULT __stdcall D3D9Device_EndScene(IDirect3DDevice9* device) noexcept
 {
     extern std::unique_ptr<ControlCenter> control_center;
@@ -1234,25 +1095,46 @@ HRESULT __stdcall D3D9Device_EndScene(IDirect3DDevice9* device) noexcept
 
         return directx_device9_endscene_hook->call<HRESULT, decltype(D3D9Device_EndScene)>(device);
     }
+
     return E_FAIL;
 }
 
-HRESULT __stdcall D3D9Device_Present(IDirect3DDevice9* device, const RECT* pSourceRect, const RECT* pDestRect, HWND hDestWindowOverride, const RGNDATA* pDirtyRegion) noexcept
+HRESULT __stdcall D3D9Device_Reset(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* pPresentationParameters) noexcept
 {
-    if (directx_device9_present_hook)
+    if (directx_device9_reset_hook)
     {
-        return directx_device9_present_hook->call<HRESULT, decltype(D3D9Device_Present)>(device, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
+        HRESULT result = directx_device9_reset_hook->call<HRESULT, decltype(D3D9Device_Reset)>(device, pPresentationParameters);
+        HookD3D9Device(device, true);
+        return result;
     }
+
     return E_FAIL;
 }
 
-HRESULT __stdcall D3D9SwapChain_Present(IDirect3DSwapChain9* swapChain, const RECT* pSourceRect, const RECT* pDestRect, HWND hDestWindowOverride, const RGNDATA* pDirtyRegion, DWORD dwFlags) noexcept
+void HookD3D9Device(IDirect3DDevice9* pDevice, bool force) noexcept
 {
-    if (directx_device9_swapchain_present_hook)
+    if (!pDevice)
     {
-        return directx_device9_swapchain_present_hook->call<HRESULT, decltype(D3D9SwapChain_Present)>(swapChain, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
+        return;
     }
-    return E_FAIL;
+
+    if (!force && current_dx_device == pDevice)
+    {
+        return;
+    }
+
+    current_dx_device = pDevice;
+    auto* vTable = *reinterpret_cast<DWORD_PTR**>(pDevice);
+
+    // Hook EndScene
+    auto* endscene = reinterpret_cast<decltype(D3D9Device_EndScene)*>(vTable[42]);
+    directx_device9_endscene_hook = std::make_unique<Hook>(reinterpret_cast<void*>(endscene), reinterpret_cast<void*>(D3D9Device_EndScene));
+    directx_device9_endscene_hook->apply();
+
+    // Hook Reset
+    auto* reset = reinterpret_cast<decltype(D3D9Device_Reset)*>(vTable[16]);
+    directx_device9_reset_hook = std::make_unique<Hook>(reinterpret_cast<void*>(reset), reinterpret_cast<void*>(D3D9Device_Reset));
+    directx_device9_reset_hook->apply();
 }
 #endif // defined
 
@@ -1428,7 +1310,6 @@ void InitialiseHooks() noexcept
         // D3DBlitToSurfaceViaTexture
         // Only Java_sun_java2d_d3d_D3DRenderQueue_flushBuffer is exported now
 
-        #if defined(HOOK_DIRECTX_BLIT)
         // Hook DirectX Surface Blit
         blit = reinterpret_cast<void*>(GetProcAddress(module, "?D3DBL_CopyImageToIntXrgbSurface@@YAJPAUSurfaceDataRasInfo@@HPAVD3DResource@@JJJJJJ@Z", "?D3DBL_CopyImageToIntXrgbSurface@@YAJPEAUSurfaceDataRasInfo@@HPEAVD3DResource@@JJJJJJ@Z"));
         if (blit)
@@ -1443,7 +1324,6 @@ void InitialiseHooks() noexcept
             directx_argb_hook = std::make_unique<Hook>(reinterpret_cast<void*>(blit), reinterpret_cast<void*>(JavaDirectXCopyImageToIntArgbSurface));
             directx_argb_hook->apply();
         }
-        #else
 
         // Direct-X Hooks
 
@@ -1494,7 +1374,7 @@ void InitialiseHooks() noexcept
             auto* vTable = *reinterpret_cast<DWORD_PTR**>(pSwapChain);
 
             // Hook Present
-            decltype(D3D11Device_Present)* present = reinterpret_cast<decltype(D3D11Device_Present)*>(vTable[8]);
+            auto* present = reinterpret_cast<decltype(D3D11Device_Present)*>(vTable[8]);
             directx_device11_swapchain_present_hook = std::make_unique<Hook>(reinterpret_cast<void*>(present), reinterpret_cast<void*>(D3D11Device_Present));
             directx_device11_swapchain_present_hook->apply();
 
@@ -1513,73 +1393,40 @@ void InitialiseHooks() noexcept
                 return;
             }
 
+            // Hook Create Device which will automatically hook EndScene
+            auto* vTable = *reinterpret_cast<DWORD_PTR**>(pD3D);
+            auto* create_device = reinterpret_cast<decltype(D3D9_CreateDevice)*>(vTable[16]);
+            directx_d3d9_createdevice_hook = std::make_unique<Hook>(reinterpret_cast<void*>(create_device), reinterpret_cast<void*>(D3D9_CreateDevice));
+            directx_d3d9_createdevice_hook->apply();
+
+            // Hook Initial Device
             D3DDISPLAYMODE display_mode;
             HRESULT hr = pD3D->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &display_mode);
-            if (FAILED(hr))
+            if (SUCCEEDED(hr))
             {
-                SAFE_RELEASE(pD3D);
-                return;
-            }
+                D3DPRESENT_PARAMETERS d3dpp = {0};
+                d3dpp.Windowed = true;
+                d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+                d3dpp.BackBufferCount = 1;
+                d3dpp.BackBufferFormat = display_mode.Format;
+                d3dpp.MultiSampleType = D3DMULTISAMPLE_NONE;
+                d3dpp.hDeviceWindow = main_window;
 
-            D3DPRESENT_PARAMETERS d3dpp = {0};
-            d3dpp.Windowed = true;
-            d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
-            d3dpp.BackBufferCount = 1;
-            d3dpp.BackBufferFormat = display_mode.Format;
-            d3dpp.MultiSampleType = D3DMULTISAMPLE_NONE;
-            d3dpp.hDeviceWindow = main_window;
+                IDirect3DDevice9* pDevice = nullptr;
+                pD3D->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, main_window, D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED, &d3dpp, &pDevice);
 
-            IDirect3DDevice9* pDevice = nullptr;
-            IDirect3DSwapChain9* pSwapChain = nullptr;
-            hr = pD3D->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, main_window, D3DCREATE_HARDWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED, &d3dpp, &pDevice);
-
-            if (FAILED(hr) || !pDevice)
-            {
+                // pDevice be hooked via CreateDevice hook
                 SAFE_RELEASE(pDevice);
-                SAFE_RELEASE(pD3D);
-                return;
             }
 
-            auto* vTable = *reinterpret_cast<DWORD_PTR**>(pDevice);
-
-            // Hook EndScene
-            decltype(D3D9Device_EndScene)* present = reinterpret_cast<decltype(D3D9Device_EndScene)*>(vTable[42]);
-            directx_device9_endscene_hook = std::make_unique<Hook>(reinterpret_cast<void*>(present), reinterpret_cast<void*>(D3D9Device_EndScene));
-            directx_device9_endscene_hook->apply();
-
-            #if defined(HOOK_D3D9_DEVICE_PRESENT)
-            decltype(D3D9Device_Present)* present = reinterpret_cast<decltype(D3D9Device_Present)*>(vTable[17]);
-            directx_device9_present_hook = std::make_unique<Hook>(reinterpret_cast<void*>(present), reinterpret_cast<void*>(D3D9Device_Present));
-            directx_device9_present_hook->apply();
-            #endif
-
-            #if defined(HOOK_D3D9_SWAPCHAIN_PRESENT)
-            hr = pDevice->GetSwapChain(0, &pSwapChain);
-            if (FAILED(hr) || !pSwapChain)
-            {
-                SAFE_RELEASE(pSwapChain);
-                SAFE_RELEASE(pDevice);
-                SAFE_RELEASE(pD3D);
-                return;
-            }
-
-            vTable = *reinterpret_cast<DWORD_PTR**>(pSwapChain);
-
-            decltype(D3D9SwapChain_Present)* present = reinterpret_cast<decltype(D3D9SwapChain_Present)*>(pVTable[6]);
-            directx_device9_swapchain_present_hook = std::make_unique<Hook>(reinterpret_cast<void*>(present), reinterpret_cast<void*>(D3D9SwapChain_Present));
-            directx_device9_swapchain_present_hook->apply();
-            #endif
-
-            SAFE_RELEASE(pSwapChain);
-            SAFE_RELEASE(pDevice);
             SAFE_RELEASE(pD3D);
         }
-        #endif
     #endif
 }
 
 void StartHook() noexcept
 {
+    Hook::setup();
     InitialiseHooks();
 
     //Signal that all hooks are finished initializing..
